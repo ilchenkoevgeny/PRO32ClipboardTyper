@@ -459,11 +459,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
             string result =
                 await CdpInputService.TestConnectionAsync(timeout.Token);
 
-            _notifyIcon.ShowBalloonTip(
-                3500,
-                "Проверка PRO32 CDP",
+            MessageBox.Show(
                 result,
-                ToolTipIcon.Info);
+                "Проверка PRO32 CDP",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
         }
         catch (Exception ex)
         {

@@ -11,8 +11,8 @@ internal sealed class CdpInputService : IAsyncDisposable
     private const int ControlModifier = 2;
     private const int ShiftModifier = 8;
     private const int PrintableKeyDelayMs = 12;
-    private const int TurboPrintableKeyDelayMs = 3;
-    private const int TurboBatchSize = 24;
+    private const int TurboPrintableKeyDelayMs = 6;
+    private const int TurboBatchSize = 8;
     private const int TurboBatchPauseMs = 8;
     private const int EnterDelayMs = 70;
     private const int TabDelayMs = 20;
@@ -25,6 +25,7 @@ internal sealed class CdpInputService : IAsyncDisposable
 
     private readonly ClientWebSocket _socket;
     private int _nextCommandId;
+    private readonly HashSet<int> _pendingInputCommandIds = new();
 
     private CdpInputService(ClientWebSocket socket)
     {
@@ -41,8 +42,8 @@ internal sealed class CdpInputService : IAsyncDisposable
         if (target is null || string.IsNullOrWhiteSpace(target.WebSocketDebuggerUrl))
         {
             throw new InvalidOperationException(
-                "CDP-порт PRO32 доступен, но удалённая сессия среди Chromium targets не найдена. " +
-                "Открой нужную сессию PRO32 и повтори ввод.");
+                "CDP-порт PRO32 доступен, но не удалось однозначно выбрать удалённую сессию. " +
+                "Оставь открытой одну нужную сессию PRO32, активируй её окно и повтори ввод.");
         }
 
         ClientWebSocket socket = new();
@@ -70,11 +71,18 @@ internal sealed class CdpInputService : IAsyncDisposable
     public static async Task<string> TestConnectionAsync(CancellationToken cancellationToken)
     {
         List<CdpTarget> targets = await GetTargetsAsync(cancellationToken);
-        CdpTarget? session = targets.FirstOrDefault(IsSessionTarget);
+        IntPtr window = PRO32WindowService.FindSessionWindow();
+        string windowTitle = PRO32WindowService.GetWindowTitle(window);
+        CdpTarget? session = FindBestTarget(targets, windowTitle);
 
-        return session is null
-            ? $"CDP отвечает. Targets: {targets.Count}, удалённая сессия не найдена."
-            : $"CDP работает. Сессия: {session.Title}";
+        string pageList = string.Join(Environment.NewLine,
+            targets.Where(IsDebuggablePage).Select(t =>
+                $" • {t.Title}"));
+
+        return $"CDP отвечает. Targets: {targets.Count}" + Environment.NewLine +
+               $"Win32-окно: {windowTitle}" + Environment.NewLine +
+               $"Выбранная сессия: {session?.Title ?? "не определена"}" +
+               Environment.NewLine + Environment.NewLine + pageList;
     }
 
     public static async Task<bool> IsPro32DebugEndpointAvailableAsync(
@@ -83,7 +91,12 @@ internal sealed class CdpInputService : IAsyncDisposable
         try
         {
             List<CdpTarget> targets = await GetTargetsAsync(cancellationToken);
-            CdpTarget? target = targets.FirstOrDefault(IsSessionTarget);
+            // Dashboard must pass the health check even before a remote session exists.
+            CdpTarget? target = targets.FirstOrDefault(t =>
+                IsDebuggablePage(t) &&
+                (t.Title.Contains("PRO32 Connect", StringComparison.OrdinalIgnoreCase) ||
+                 t.Url.Contains("pro32connect", StringComparison.OrdinalIgnoreCase)))
+                ?? targets.FirstOrDefault(IsSessionTarget);
 
             if (target is null || string.IsNullOrWhiteSpace(target.WebSocketDebuggerUrl))
                 return false;
@@ -164,12 +177,12 @@ internal sealed class CdpInputService : IAsyncDisposable
 
                         await SendSpecialKeyAsync(
                             "Enter", "Enter", 13,
-                            turbo ? Math.Min(EnterDelayMs, 30) : EnterDelayMs,
+                            EnterDelayMs,
                             cancellationToken);
 
                         await SendSpecialKeyAsync(
                             "Home", "Home", 0x24,
-                            turbo ? Math.Min(HomeDelayMs, 15) : HomeDelayMs,
+                            HomeDelayMs,
                             cancellationToken);
 
                         atLineStart = true;
@@ -211,7 +224,7 @@ internal sealed class CdpInputService : IAsyncDisposable
 
                         await SendSpecialKeyAsync(
                             "Tab", "Tab", 9,
-                            turbo ? Math.Min(TabDelayMs, 10) : TabDelayMs,
+                            TabDelayMs,
                             cancellationToken);
 
                         atLineStart = false;
@@ -226,7 +239,7 @@ internal sealed class CdpInputService : IAsyncDisposable
 
                         await SendSpecialKeyAsync(
                             "Backspace", "Backspace", 8,
-                            turbo ? Math.Min(BackspaceDelayMs, 10) : BackspaceDelayMs,
+                            BackspaceDelayMs,
                             cancellationToken);
                         break;
 
@@ -338,8 +351,9 @@ internal sealed class CdpInputService : IAsyncDisposable
 
     private async Task ReleaseStuckKeysAsync(CancellationToken cancellationToken)
     {
-        await DispatchRawKeyEventAsync("keyUp", "Control", "ControlLeft", 0x11, 0, cancellationToken);
+        await DispatchRawKeyEventAsync("keyUp", "v", "KeyV", 0x56, 0, cancellationToken);
         await DispatchRawKeyEventAsync("keyUp", "Shift", "ShiftLeft", 0x10, 0, cancellationToken);
+        await DispatchRawKeyEventAsync("keyUp", "Control", "ControlLeft", 0x11, 0, cancellationToken);
         await DispatchRawKeyEventAsync("keyUp", "Alt", "AltLeft", 0x12, 0, cancellationToken);
         await DispatchRawKeyEventAsync("keyUp", "Meta", "MetaLeft", 0x5B, 0, cancellationToken);
         await Task.Delay(20, cancellationToken);
@@ -462,22 +476,64 @@ internal sealed class CdpInputService : IAsyncDisposable
         });
 
         byte[] payload = Encoding.UTF8.GetBytes(json);
+        using CancellationTokenSource timeout =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(CommandTimeout);
+
+        try
+        {
+            await _socket.SendAsync(
+                payload, WebSocketMessageType.Text, true, timeout.Token);
+
+            _pendingInputCommandIds.Add(commandId);
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            Abort();
+            throw new TimeoutException("PRO32/CDP: истекло время отправки Turbo-команды.", ex);
+        }
+    }
+
+    private async Task FlushQueuedInputAsync(CancellationToken cancellationToken)
+    {
+        if (_pendingInputCommandIds.Count == 0)
+            return;
 
         using CancellationTokenSource timeout =
             CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(CommandTimeout);
 
-        await _socket.SendAsync(
-            payload,
-            WebSocketMessageType.Text,
-            endOfMessage: true,
-            timeout.Token);
-    }
+        try
+        {
+            // Read every response, not just a response to an extra Shift keyUp.
+            // CDP accepts commands asynchronously and a batch may contain errors.
+            while (_pendingInputCommandIds.Count > 0)
+            {
+                string response = await ReceiveTextMessageAsync(timeout.Token);
+                using JsonDocument document = JsonDocument.Parse(response);
+                JsonElement root = document.RootElement;
 
-    private Task FlushQueuedInputAsync(CancellationToken cancellationToken)
-    {
-        return DispatchRawKeyEventAsync(
-            "keyUp", "Shift", "ShiftLeft", 0x10, 0, cancellationToken);
+                if (!root.TryGetProperty("id", out JsonElement id) ||
+                    !id.TryGetInt32(out int commandId) ||
+                    !_pendingInputCommandIds.Remove(commandId))
+                {
+                    continue;
+                }
+
+                if (root.TryGetProperty("error", out JsonElement error))
+                {
+                    Abort();
+                    throw new InvalidOperationException(
+                        $"Chromium отклонил Turbo-команду {commandId}: {error}");
+                }
+            }
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            Abort();
+            throw new TimeoutException(
+                "PRO32/CDP: не получены подтверждения всех клавиш Turbo-пакета.", ex);
+        }
     }
 
     private async Task SendCommandAsync(
@@ -605,72 +661,48 @@ internal sealed class CdpInputService : IAsyncDisposable
     {
         List<CdpTarget> sessions = targets.Where(IsSessionTarget).ToList();
 
-        if (sessions.Count == 0)
-            return null;
-
         if (!string.IsNullOrWhiteSpace(windowTitle))
         {
-            CdpTarget? exact = sessions.FirstOrDefault(
-                x => x.Title.Equals(windowTitle, StringComparison.OrdinalIgnoreCase));
+            List<CdpTarget> exact = sessions.Where(
+                x => x.Title.Equals(windowTitle, StringComparison.OrdinalIgnoreCase)).ToList();
 
-            if (exact is not null)
-                return exact;
+            if (exact.Count == 1)
+                return exact[0];
 
             string stableTitle = RemoveLeadingTimer(windowTitle);
-
-            CdpTarget? stable = sessions.FirstOrDefault(
+            List<CdpTarget> stable = sessions.Where(
                 x => RemoveLeadingTimer(x.Title)
-                    .Equals(stableTitle, StringComparison.OrdinalIgnoreCase));
+                    .Equals(stableTitle, StringComparison.OrdinalIgnoreCase)).ToList();
 
-            if (stable is not null)
-                return stable;
+            if (stable.Count == 1)
+                return stable[0];
         }
 
-        return sessions
-            .OrderByDescending(GetSessionTargetScore)
-            .FirstOrDefault();
+        // Do not type into an arbitrary page when multiple targets are open.
+        if (sessions.Count == 1)
+            return sessions[0];
+
+        List<CdpTarget> namedSessions = sessions.Where(x =>
+            x.Title.Contains("PRO32 Connect", StringComparison.OrdinalIgnoreCase)).ToList();
+
+        if (namedSessions.Count == 1)
+            return namedSessions[0];
+
+        return null;
+    }
+
+    private static bool IsDebuggablePage(CdpTarget target)
+    {
+        return target.Type.Equals("page", StringComparison.OrdinalIgnoreCase) &&
+               !string.IsNullOrWhiteSpace(target.WebSocketDebuggerUrl) &&
+               !target.Url.StartsWith("devtools://", StringComparison.OrdinalIgnoreCase) &&
+               !target.Url.StartsWith("chrome-extension://", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsSessionTarget(CdpTarget target)
     {
-        if (!target.Type.Equals("page", StringComparison.OrdinalIgnoreCase) ||
-            string.IsNullOrWhiteSpace(target.WebSocketDebuggerUrl))
-        {
-            return false;
-        }
-
-        if (target.Title.Contains(
-            "PRO32 Connect Dashboard",
-            StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        return !target.Url.StartsWith("devtools://", StringComparison.OrdinalIgnoreCase) &&
-               !target.Url.StartsWith("chrome-extension://", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static int GetSessionTargetScore(CdpTarget target)
-    {
-        int score = 0;
-
-        if (target.Title.Contains("PRO32 Connect", StringComparison.OrdinalIgnoreCase))
-            score += 20;
-
-        if (target.Url.Contains("remote", StringComparison.OrdinalIgnoreCase) ||
-            target.Url.Contains("session", StringComparison.OrdinalIgnoreCase) ||
-            target.Url.Contains("control", StringComparison.OrdinalIgnoreCase))
-        {
-            score += 10;
-        }
-
-        if (target.Url.Contains("dashboard", StringComparison.OrdinalIgnoreCase) ||
-            target.Url.Contains("settings", StringComparison.OrdinalIgnoreCase))
-        {
-            score -= 20;
-        }
-
-        return score;
+        return IsDebuggablePage(target) &&
+               !target.Title.Contains("PRO32 Connect Dashboard", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string RemoveLeadingTimer(string title)
