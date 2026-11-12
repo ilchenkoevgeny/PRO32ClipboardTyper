@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -11,9 +12,9 @@ internal sealed class CdpInputService : IAsyncDisposable
     private const int ControlModifier = 2;
     private const int ShiftModifier = 8;
     private const int PrintableKeyDelayMs = 12;
-    private const int TurboPrintableKeyDelayMs = 6;
-    private const int TurboBatchSize = 8;
-    private const int TurboBatchPauseMs = 8;
+    private const int TurboPrintableKeyDelayMs = 1;
+    private const int TurboBatchSize = 16;
+    private const int TurboBatchPauseMs = 2;
     private const int EnterDelayMs = 70;
     private const int TabDelayMs = 20;
     private const int BackspaceDelayMs = 20;
@@ -145,7 +146,26 @@ internal sealed class CdpInputService : IAsyncDisposable
 
     public Task SendTextTurboAsync(string text, CancellationToken cancellationToken)
     {
-        return SendTextCoreAsync(text, turbo: true, cancellationToken);
+        // Keep short high-resolution waits off the WinForms UI thread.
+        return Task.Run(
+            () => SendTextCoreAsync(text, turbo: true, cancellationToken),
+            cancellationToken);
+    }
+
+    private static void WaitTurboDelay(int milliseconds, CancellationToken cancellationToken)
+    {
+        // Task.Delay can round short intervals to the Windows timer tick.
+        // Use a monotonic clock for the 1-2 ms Turbo pacing only.
+        long start = Stopwatch.GetTimestamp();
+        long ticks = (long)Math.Ceiling(milliseconds * (double)Stopwatch.Frequency / 1000);
+
+        while (Stopwatch.GetTimestamp() - start < ticks)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Thread.SpinWait(64);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
     private async Task SendTextCoreAsync(
@@ -200,11 +220,11 @@ internal sealed class CdpInputService : IAsyncDisposable
                                 {
                                     await FlushQueuedInputAsync(cancellationToken);
                                     queuedPrintableCharacters = 0;
-                                    await Task.Delay(TurboBatchPauseMs, cancellationToken);
+                                    WaitTurboDelay(TurboBatchPauseMs, cancellationToken);
                                 }
                                 else
                                 {
-                                    await Task.Delay(TurboPrintableKeyDelayMs, cancellationToken);
+                                    WaitTurboDelay(TurboPrintableKeyDelayMs, cancellationToken);
                                 }
                             }
                             else
@@ -253,11 +273,11 @@ internal sealed class CdpInputService : IAsyncDisposable
                             {
                                 await FlushQueuedInputAsync(cancellationToken);
                                 queuedPrintableCharacters = 0;
-                                await Task.Delay(TurboBatchPauseMs, cancellationToken);
+                                WaitTurboDelay(TurboBatchPauseMs, cancellationToken);
                             }
                             else
                             {
-                                await Task.Delay(TurboPrintableKeyDelayMs, cancellationToken);
+                                WaitTurboDelay(TurboPrintableKeyDelayMs, cancellationToken);
                             }
                         }
                         else

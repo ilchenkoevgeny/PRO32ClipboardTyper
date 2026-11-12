@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 
 namespace PRO32ClipboardTyper;
 
@@ -21,6 +22,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private bool _clipboardOperationInProgress;
     private bool _pasteChordWasDown;
     private bool _stopChordWasDown;
+    private string _lastTypingMeasurement = "Пока нет завершённых замеров.";
 
     public TrayApplicationContext()
     {
@@ -62,6 +64,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
         contextMenu.Items.Add(_pasteMenuItem);
         contextMenu.Items.Add(_turboPasteMenuItem);
         contextMenu.Items.Add(_stopMenuItem);
+        contextMenu.Items.Add(new ToolStripMenuItem(
+            "Последний замер скорости",
+            null,
+            (_, _) => MessageBox.Show(_lastTypingMeasurement,
+                "PRO32 Clipboard Typer — скорость",
+                MessageBoxButtons.OK, MessageBoxIcon.Information)));
         contextMenu.Items.Add(new ToolStripSeparator());
         contextMenu.Items.Add(pro32ClipboardMenuItem);
         contextMenu.Items.Add(new ToolStripSeparator());
@@ -194,6 +202,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     cancellationToken);
 
             _activeCdp = cdp;
+            Stopwatch typingTimer = Stopwatch.StartNew();
 
             try
             {
@@ -208,10 +217,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     _activeCdp = null;
             }
 
+            typingTimer.Stop();
+            double seconds = typingTimer.Elapsed.TotalSeconds;
+            double rate = text.Length / Math.Max(seconds, 0.001);
+            string mode = turbo ? "Turbo" : "Legacy";
+
+            _lastTypingMeasurement =
+                $"{mode}: {text.Length:N0} символов исходного текста за {seconds:F2} с." +
+                Environment.NewLine + $"Скорость отправки: {rate:F0} симв./с." +
+                Environment.NewLine + "Замер до подтверждения CDP, не до отображения в RDP.";
+
             _notifyIcon.ShowBalloonTip(
-                1400,
+                3500,
                 "PRO32 Clipboard Typer",
-                turbo ? "Turbo-ввод завершён." : "Ввод завершён.",
+                $"{mode}: {seconds:F2} с, {rate:F0} симв./с. (CDP)",
                 ToolTipIcon.Info);
         }
         catch (OperationCanceledException)
@@ -285,7 +304,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _notifyIcon.ShowBalloonTip(
                 1800,
                 "PRO32 Clipboard Typer",
-                "Выполнена вставка через буфер PRO32 (первый удалённый ПК).",
+                "Ctrl+V отправлен первому ПК. Синхронизация буфера не подтверждена.",
                 ToolTipIcon.Info);
         }
         catch (Exception ex)
