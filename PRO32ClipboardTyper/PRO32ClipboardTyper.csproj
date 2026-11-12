@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\pro32.ico</ApplicationIcon>
+    <AssemblyName>PRO32ClipboardTyper</AssemblyName>
+    <RootNamespace>PRO32ClipboardTyper</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="TrayApplicationContext.cs" />
+    <Compile Include="HotKeyWindow.cs" />
+    <Compile Include="NativeMethods.cs" />
+    <Compile Include="ClipboardService.cs" />
+    <Compile Include="PRO32WindowService.cs" />
+    <Compile Include="PRO32ProcessService.cs" />
+    <Compile Include="CdpInputService.cs" />
+  </ItemGroup>
+
+  <Target Name="ExtractPro32ApplicationIcon"
+          BeforeTargets="CoreCompile"
+          Condition="'$(OS)' == 'Windows_NT'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\extract-pro32-icon.ps1&quot; -OutputPath &quot;$(MSBuildProjectDirectory)\Assets\pro32.ico&quot;" />
+  </Target>
+</Project>
