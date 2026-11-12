@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <PlatformTarget>x64</PlatformTarget>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon>Assets\pro32.ico</ApplicationIcon>
+    <ApplicationIcon>$(MSBuildProjectDirectory)\Assets\fallback.ico</ApplicationIcon>
     <AssemblyName>PRO32ClipboardTyper</AssemblyName>
     <RootNamespace>PRO32ClipboardTyper</RootNamespace>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
@@ -24,9 +24,23 @@
     <Compile Include="CdpInputService.cs" />
   </ItemGroup>
 
+  <!-- The checked-in fallback icon keeps clean builds independent of PRO32. -->
   <Target Name="ExtractPro32ApplicationIcon"
           BeforeTargets="CoreCompile"
-          Condition="'$(OS)' == 'Windows_NT'">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\extract-pro32-icon.ps1&quot; -OutputPath &quot;$(MSBuildProjectDirectory)\Assets\pro32.ico&quot;" />
+          Condition="'$(OS)' == 'Windows_NT' And '$(DesignTimeBuild)' != 'true'">
+    <Exec Command="powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\extract-pro32-icon.ps1&quot; -OutputPath &quot;$(MSBuildProjectDirectory)\Assets\pro32.ico&quot;"
+          IgnoreExitCode="true"
+          IgnoreStandardErrorWarningFormat="true"
+          ContinueOnError="WarnAndContinue">
+      <Output TaskParameter="ExitCode" PropertyName="_Pro32IconExitCode" />
+    </Exec>
+
+    <PropertyGroup>
+      <ApplicationIcon Condition="'$(_Pro32IconExitCode)' == '0' And Exists('$(MSBuildProjectDirectory)\Assets\pro32.ico')">$(MSBuildProjectDirectory)\Assets\pro32.ico</ApplicationIcon>
+    </PropertyGroup>
+
+    <Message Condition="'$(_Pro32IconExitCode)' != '0'"
+             Text="PRO32 icon unavailable; using the bundled fallback icon."
+             Importance="high" />
   </Target>
 </Project>
